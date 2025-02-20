@@ -206,22 +206,6 @@ def create_artif_data(metrics_t: list, prev_data_csv_path: str):
 
 
 
-def postprocess_cell_tracks(df, window_size=5):
-    df = df.sort_values(["spore_id", "image_idx"])
-    df["artificial_recent"] = (df["data_type"] == "artificial").astype(int)
-
-    df["rolling_artificial_fraction"] = df.groupby("spore_id")["artificial_recent"].transform(
-        lambda x: x.rolling(window_size, min_periods=1).mean()
-    )
-
-    valid_spores = df.groupby("spore_id")["rolling_artificial_fraction"].max() <= 0.25
-    df = df[df["spore_id"].isin(valid_spores[valid_spores].index)]
-    df.drop(columns=["artificial_recent", "rolling_artificial_fraction"], inplace=True)
-    return df 
-
-
-
-  
 ##===============================MAIN===================================
 if __name__ == "__main__":
 
@@ -245,7 +229,7 @@ if __name__ == "__main__":
 
   #FOR IMAGES IN FOLDER ===================
   #for image_file in os.listdir(image_folder_path): # FOR EXP USE
-  for test_idx in range(0, 30): #FOR TEST USE
+  for test_idx in range(0, 100): #FOR TEST USE
     image_file = "M4581_s1_ThT_stabilized_" + str(test_idx).zfill(4) + ".tif" #FOR TEST USE
     image_path = os.path.join(image_folder_path, image_file)
     image_idx = image_file.split("_")[-1].replace(".tif", "")
@@ -274,16 +258,14 @@ if __name__ == "__main__":
     #COMBINE TRUE AND ARTIFICIAL DATA
     cols = ["image_idx", "spore_id", "x", "y", "perimeter", "area", "minor_axis_length"]
     df = pd.DataFrame(shape_metrics, columns=cols)
-    df["data_type"] = "experiment"
+    df["experimental"] = 1
 
     #POSTPROCESSING=================
+    #create artificial data for missing spores from prev time points, removes track if more than a fraction of any cell track is artifical over window size on prev t 
     if test_idx > 0:
       artificial_data_df = create_artif_data(shape_metrics, segm_output_csv)
-      artificial_data_df["data_type"] = "artificial"
+      artificial_data_df["experimental"] = 0
       df = pd.concat([df, artificial_data_df])
-
-      #remove if more than 25% of any cell track is artificial at time t 
-      df = postprocess_cell_tracks(df)
 
     #WRITE DATA=================
     write_data(df, cols, test_idx, segm_output_csv)
@@ -299,6 +281,7 @@ if __name__ == "__main__":
 
 
   #PLOTTING FEATURES===============
-  for feature in ["perimeter", "area", "minor_axis_length"]:
-    LineplotTrackFeature(segm_output_csv, f"{segmentation_repo + feature}_tmp2.jpg", feature)
+  #for feature in ["perimeter", "area", "minor_axis_length"]:
+  for feature in ["area"]: 
+    LineplotTrackFeature(segm_output_csv, f"{segmentation_repo + feature}_3tmp.jpg", feature)
 
