@@ -1,19 +1,19 @@
 import cv2
 import os 
 import numpy as np 
-import imageio
+import imageio.v2 as imageio
 import matplotlib.pyplot as plt
 import pandas as pd
 from scipy.spatial import KDTree
 import math 
 import seaborn as sns 
+
 def CreateDir(dir_path):
   if not os.path.exists(dir_path[:-1]):
      os.makedirs(dir_path[:-1])
 
 def AdjustColorRange(image):
     norm_image = cv2.normalize(image, None, 0, 255, cv2.NORM_MINMAX)
-
     return norm_image
 
 def BackgroundSubtraction(image):
@@ -21,23 +21,58 @@ def BackgroundSubtraction(image):
   corrected_image = cv2.subtract(image, background)
   return corrected_image
 
-def Threshold(image):
-  '''segment the image based on detected edges'''
-  edges = cv2.Canny(image, 100, 200)
-  contours, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-  filled_image = np.zeros_like(image)
-  cv2.drawContours(filled_image, contours, -1, 255, thickness=cv2.FILLED)
-  return filled_image, contours
+def ThresholdWithWatershed(image):
+      # Ensure the image is grayscale
+    if len(image.shape) == 3:  # If the image has 3 channels
+        image = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    # Apply binary thresholding
+    _, binary = cv2.threshold(image, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
 
-def DataExtraction(data_path: str, i:int, contours, min_contour_points = 10) -> dict:
+    # Noise removal
+    kernel = np.ones((3, 3), np.uint8)
+    opening = cv2.morphologyEx(binary, cv2.MORPH_OPEN, kernel, iterations=2)
+
+    # Sure background area
+    sure_bg = cv2.dilate(opening, kernel, iterations=3)
+
+    # Sure foreground area
+    dist_transform = cv2.distanceTransform(opening, cv2.DIST_L2, 5)
+    _, sure_fg = cv2.threshold(dist_transform, 0.7 * dist_transform.max(), 255, 0)
+
+    # Unknown region
+    sure_fg = np.uint8(sure_fg)
+    unknown = cv2.subtract(sure_bg, sure_fg)
+
+    # Marker labelling
+    _, markers = cv2.connectedComponents(sure_fg)
+    markers = markers + 1
+    markers[unknown == 255] = 0
+
+    # Apply watershed
+    markers = cv2.watershed(cv2.cvtColor(image, cv2.COLOR_GRAY2BGR), markers)
+
+    # Mark boundaries in the original image
+    segmented_image = image.copy()
+    segmented_image[markers == -1] = 255  # Mark boundaries as white
+
+    # Extract contours
+    contours, _ = cv2.findContours(sure_fg, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+    return segmented_image, contours
+
+def DataExtraction(data_path: str, i:int, contours, scalebar, min_contour_points = 10) -> dict:
   '''extracts shape metrics from each detected spot
   each contour contains a set of points defining the outline of a spot'''
+
   metrics = []
+  filtered_contours = []
+
   if int(i) == 0:
       max_id = 0
   if int(i) != 0:
      max_id = None
   for contour in contours:
+    #check enough points in countour, if theres not enough its probably too small
     if len(contour) >= min_contour_points:  
             perimeter = cv2. arcLength(contour, True)
             area = cv2.contourArea(contour)
@@ -47,12 +82,14 @@ def DataExtraction(data_path: str, i:int, contours, min_contour_points = 10) -> 
             minor_axis_length = min(axes) 
     else:
        continue
-    if area<200:
+ 
+    #filter out small spots
+    if area * scalebar ** 2 > .25: #/mu m
+        continue
+    if perimeter * scalebar > 3: 
        continue
-    if area>400:
-       continue
-    if perimeter > 100:
-       continue
+    if minor_axis_length * scalebar > .34:
+        continue
     
     #get centroid metrics  
     M = cv2.moments(contour)
@@ -62,11 +99,16 @@ def DataExtraction(data_path: str, i:int, contours, min_contour_points = 10) -> 
     else:
         cx, cy = None, None  
         continue
+    
     #see if existing track
     spore_id, max_id = GetSporeID(data_path, [cx, cy], i, max_id)
-    if spore_id == None:
+    #if new spore, dont record
+    if spore_id is None:
        continue
-    #write data
+    
+    #accepted contours
+    filtered_contours.append(contour)
+    #dictionary entry 
     metrics.append({
         'perimeter': perimeter,
         'area': area,
@@ -75,7 +117,7 @@ def DataExtraction(data_path: str, i:int, contours, min_contour_points = 10) -> 
         'image_idx': i,
         "spore_id": spore_id
     })
-  return metrics
+  return metrics, filtered_contours
 
 
 def GetSporeID(data_path, centroid, i, max_id, xy_tol = 10) -> int:
@@ -109,72 +151,25 @@ def GetSporeID(data_path, centroid, i, max_id, xy_tol = 10) -> int:
 
 def write_data(data, columns, i, output_csv):
        #WRITE DATA=================
-    data = pd.DataFrame(data, columns=columns)
     if i == 0:
       data.to_csv(output_csv, index=False, header = True)
     if i != 0:
       data.to_csv(output_csv, index=False, header = False, mode = "a")
 
-
-def FilterbyTrackStart(data_input_path, data_output_path, frame_idx_criteria) -> None:
-   print(f"filtering data by track start...")
-   df = pd.read_csv(data_input_path)
-
-   filtered_data = []
-   filtered_count = 0
-   accepted_count = 0
-
-   unique_spore_ids = df["spore_id"].unique()
-   for spore_id in unique_spore_ids:
-      spore_df = df[df["spore_id"]== spore_id]
-      if frame_idx_criteria in spore_df["image_idx"].values:
-          filtered_data.append(spore_df)
-          accepted_count += 1
-      else:
-         filtered_count += 1
-
-   if filtered_data:
-      filtered_df = pd.concat(filtered_data)
-      filtered_df.to_csv(data_output_path, index=False)
-      print(f"\t filtered {filtered_count} tracks...")
-      print(f"\t accepted {accepted_count} tracks...")
-   else:
-      print("\t no tracks meet the specified criteria...")
-
-def FilterbyTrackLength(data_input_path, data_output_path, length_threshold) -> None:
-   print(f"filtering tracks by length...")
-   df = pd.read_csv(data_input_path)
-
-   filtered_data = []
-   filtered_count = 0
-   accepted_count = 0
-
-   unique_spore_ids = df["spore_id"].unique()
-   for spore_id in unique_spore_ids:
-      spore_df = df[df["spore_id"]== spore_id]
-      if len(spore_df) >= length_threshold:
-         filtered_data.append(spore_df)
-         accepted_count += 1
-      else:
-         filtered_count += 1
-   if filtered_data:
-      filtered_df = pd.concat(filtered_data)
-      filtered_df.to_csv(data_output_path, index=False)
-      print(f"\t filtered {filtered_count} tracks...")
-      print(f"\t accepted {accepted_count} tracks...")
-   else:
-      print("\t no tracks meet the specified criteria...")
-
 def LineplotTrackFeature(data_input_path, lineplot_output_path, feature) -> None:
    df = pd.read_csv(data_input_path)
    spore_ids = df["spore_id"].unique()
-   plt.figure(figsize = (6, 5))
+   plt.figure(figsize = (6, 4))
+   tracks = 0
    for spore_id in spore_ids:
       spore_df = df[df["spore_id"] == spore_id]
-      sns.lineplot(x = "image_idx", y = feature, data = spore_df)
-
+      sns.scatterplot(x = "image_idx", y = feature, data = spore_df,  s = 30)
+      sns.lineplot(x = "image_idx", y = feature, data = spore_df,  linewidth = 1)
+      tracks += 1
+   plt.xlabel("Time index", fontsize = 18)
+   plt.ylabel(feature.title(), fontsize = 18)
    plt.savefig(lineplot_output_path)
-   print(f"plotting {len(spore_ids)} spore {feature}s...")
+   print(f"plotting {tracks} spore {feature}s...")
 
 
 def Gif(image_dir, gif_name, fps, output_dir):
@@ -196,7 +191,37 @@ def Gif(image_dir, gif_name, fps, output_dir):
     
     print(f"gif saved as {gif_path}...")
 
+def create_artif_data(metrics_t: list, prev_data_csv_path: str):
+  df_t = pd.DataFrame(metrics_t)
+  df_allt = pd.read_csv(prev_data_csv_path)
+  t_idx = int(df_t["image_idx"].values[0])
+  df_tprev = df_allt[df_allt["image_idx"] == t_idx - 1]
+  sporeids_tprev = df_tprev["spore_id"].unique()
+  sporeids_t = df_t["spore_id"].unique()
+  missing_sporeids = [sporeid for sporeid in sporeids_tprev if sporeid not in sporeids_t]
+  df_tprev_missing = df_tprev[df_tprev["spore_id"].isin(missing_sporeids)]
+  df_t_artificial = df_tprev_missing.copy()
+  df_t_artificial["image_idx"] = t_idx
+  return df_t_artificial
 
+
+
+def postprocess_cell_tracks(df, window_size=5):
+    df = df.sort_values(["spore_id", "image_idx"])
+    df["artificial_recent"] = (df["data_type"] == "artificial").astype(int)
+
+    df["rolling_artificial_fraction"] = df.groupby("spore_id")["artificial_recent"].transform(
+        lambda x: x.rolling(window_size, min_periods=1).mean()
+    )
+
+    valid_spores = df.groupby("spore_id")["rolling_artificial_fraction"].max() <= 0.25
+    df = df[df["spore_id"].isin(valid_spores[valid_spores].index)]
+    df.drop(columns=["artificial_recent", "rolling_artificial_fraction"], inplace=True)
+    return df 
+
+
+
+  
 ##===============================MAIN===================================
 if __name__ == "__main__":
 
@@ -205,6 +230,7 @@ if __name__ == "__main__":
   microscopy = "ThT"
   image_folder_path = "/Users/alexandranava/Desktop/Spores/Data/M4581_s1/ThT/"
   segmentation_repo = "/Users/alexandranava/Desktop/Spores/Spore_Segmentation/"
+  scalebar = 0.065 #1px = 0.065/mu m
   
   original_image_dir = f"{segmentation_repo}OriginalImages/{experiment}_{microscopy}/"
   CreateDir(original_image_dir)
@@ -216,9 +242,10 @@ if __name__ == "__main__":
   segmented_image_dir = f"{segmentation_repo}SegmentedImages/{experiment}_{microscopy}/"
   CreateDir(segmented_image_dir)
 
+
   #FOR IMAGES IN FOLDER ===================
   #for image_file in os.listdir(image_folder_path): # FOR EXP USE
-  for test_idx in range(0, 60): #FOR TEST USE
+  for test_idx in range(0, 30): #FOR TEST USE
     image_file = "M4581_s1_ThT_stabilized_" + str(test_idx).zfill(4) + ".tif" #FOR TEST USE
     image_path = os.path.join(image_folder_path, image_file)
     image_idx = image_file.split("_")[-1].replace(".tif", "")
@@ -227,34 +254,51 @@ if __name__ == "__main__":
 
     #ORIGINAL IMAGE
     plt.imshow(image)
-    plt.savefig(os.path.join(original_image_dir, image_file.replace(".tif", ".jpg")))
+    plt.axis('off')
+    plt.savefig(os.path.join(original_image_dir, image_file.replace(".tif", ".jpg")), bbox_inches='tight', pad_inches=0)
 
     #PREPROCESSING==================
     image = BackgroundSubtraction(image)#background subtraction
     image = AdjustColorRange(image)#color range adjustment
     plt.imshow(image)
-    plt.savefig(os.path.join(preprocessed_image_dir, image_file.replace(".tif", ".jpg")))
-
+    plt.axis('off')
+    plt.savefig(os.path.join(preprocessed_image_dir, image_file.replace(".tif", ".jpg")), bbox_inches='tight', pad_inches=0)
     #SEGMENTATION===================
-    image, contours = Threshold(image)#define contours
-    #save segmented image
-    plt.imshow(image)
-    plt.savefig(os.path.join(segmented_image_dir, image_file.replace(".tif", ".jpg")))
-    plt.close()
+    segmented_image, contours = ThresholdWithWatershed(image)#define contours
+    plt.imshow(segmented_image, cmap = 'hot')
+    plt.axis('off')
 
-    #DATA EXTRACTION=================
-    #extract shape metrics of contours on thresholded image
-    shape_metrics = DataExtraction(segm_output_csv, image_idx, contours)
+    #DATA EXTRACTION/SPOT FILTERING=================
+    shape_metrics, filtered_contours = DataExtraction(segm_output_csv, image_idx, contours, scalebar)
+    #df with spores data from last frame, but reindexed to current frame 
+    #COMBINE TRUE AND ARTIFICIAL DATA
     cols = ["image_idx", "spore_id", "x", "y", "perimeter", "area", "minor_axis_length"]
-    write_data(shape_metrics, cols, test_idx, segm_output_csv)
+    df = pd.DataFrame(shape_metrics, columns=cols)
+    df["data_type"] = "experiment"
 
+    #POSTPROCESSING=================
+    if test_idx > 0:
+      artificial_data_df = create_artif_data(shape_metrics, segm_output_csv)
+      artificial_data_df["data_type"] = "artificial"
+      df = pd.concat([df, artificial_data_df])
+
+      #remove if more than 25% of any cell track is artificial at time t 
+      df = postprocess_cell_tracks(df)
+
+    #WRITE DATA=================
+    write_data(df, cols, test_idx, segm_output_csv)
+    #PLOT SEGMENTED IMAGE WITH SPOTS
+    sns.scatterplot(x = "x", y = "y", data = df, color = "white", s=3)
+    plt.savefig(os.path.join(segmented_image_dir, image_file.replace(".tif", ".jpg")), bbox_inches='tight', pad_inches=0)
+    plt.close()
+    
   #MAKE GIFS=========
   Gif(original_image_dir, f'{experiment}_{microscopy}_Unprocessed.gif', 3, segmentation_repo)
   Gif(preprocessed_image_dir, f'{experiment}_{microscopy}_Preprocessed.gif', 3, segmentation_repo)
   Gif(segmented_image_dir, f'{experiment}_{microscopy}_Segmented.gif', 3, segmentation_repo)
-  
+
 
   #PLOTTING FEATURES===============
   for feature in ["perimeter", "area", "minor_axis_length"]:
-    LineplotTrackFeature(segm_output_csv, f"{feature}_tmp.jpg", feature)
+    LineplotTrackFeature(segm_output_csv, f"{segmentation_repo + feature}_tmp2.jpg", feature)
 
