@@ -170,6 +170,7 @@ def LineplotTrackFeature(data_input_path, lineplot_output_path, feature) -> None
    plt.ylabel(feature.title(), fontsize = 18)
    plt.savefig(lineplot_output_path)
    print(f"plotting {tracks} spore {feature}s...")
+   print(f"jpg saved to {lineplot_output_path}...")
 
 
 def Gif(image_dir, gif_name, fps, output_dir):
@@ -193,6 +194,9 @@ def Gif(image_dir, gif_name, fps, output_dir):
 
 def create_artif_data(metrics_t: list, prev_data_csv_path: str):
   df_t = pd.DataFrame(metrics_t)
+
+  if df_t.empty:
+    return pd.DataFrame()
   df_allt = pd.read_csv(prev_data_csv_path)
   t_idx = int(df_t["image_idx"].values[0])
   df_tprev = df_allt[df_allt["image_idx"] == t_idx - 1]
@@ -203,6 +207,32 @@ def create_artif_data(metrics_t: list, prev_data_csv_path: str):
   df_t_artificial = df_tprev_missing.copy()
   df_t_artificial["image_idx"] = t_idx
   return df_t_artificial
+
+
+def postprocess_artificial_threshold(t_idx:int, csv_path:str, artif_max_threshold = .7, window_size = 10) -> pd.DataFrame:
+  if t_idx in [0, 1]:
+    return pd.read_csv(csv_path)
+
+  df = pd.read_csv(csv_path)
+  df_processed = df.copy()
+  spore_dfs: pd.group = df.groupby("spore_id")
+  window_init: int = max(0, t_idx - window_size)
+  window = np.arange(window_init, t_idx)
+
+  bad_tracks_ids = []
+  for spore_id, spore_df in spore_dfs:
+    artificial_count = 0
+    for tmp_idx in window:
+      spore_tmpidx_df = spore_df[spore_df["image_idx"] == tmp_idx]
+      artificial_count += (spore_tmpidx_df["experimental"] == 0).sum()
+    artificial_frac = artificial_count/window_size
+    if artificial_frac > artif_max_threshold:  # Only remove if above threshold
+        bad_tracks_ids.append(float(spore_id))
+  df_processed["spore_id"] = df_processed["spore_id"].astype(float)  # Convert for safe filtering
+  bad_tracks_ids = [float(spore) for spore in bad_tracks_ids]  # Ensure IDs match
+  df_processed = df_processed[~df_processed["spore_id"].isin(bad_tracks_ids)]
+  print(f"\tfiltered {len(bad_tracks_ids)} spores at index {t_idx} (too artificial)...")
+  return df_processed
 
 
 
@@ -229,7 +259,7 @@ if __name__ == "__main__":
 
   #FOR IMAGES IN FOLDER ===================
   #for image_file in os.listdir(image_folder_path): # FOR EXP USE
-  for test_idx in range(0, 100): #FOR TEST USE
+  for test_idx in range(0, 200): #FOR TEST USE
     image_file = "M4581_s1_ThT_stabilized_" + str(test_idx).zfill(4) + ".tif" #FOR TEST USE
     image_path = os.path.join(image_folder_path, image_file)
     image_idx = image_file.split("_")[-1].replace(".tif", "")
@@ -269,6 +299,11 @@ if __name__ == "__main__":
 
     #WRITE DATA=================
     write_data(df, cols, test_idx, segm_output_csv)
+
+    #POSTPROCESS==============
+    df = postprocess_artificial_threshold(test_idx, segm_output_csv)
+    df.to_csv(segm_output_csv, index = False)
+
     #PLOT SEGMENTED IMAGE WITH SPOTS
     sns.scatterplot(x = "x", y = "y", data = df, color = "white", s=3)
     plt.savefig(os.path.join(segmented_image_dir, image_file.replace(".tif", ".jpg")), bbox_inches='tight', pad_inches=0)
@@ -283,5 +318,5 @@ if __name__ == "__main__":
   #PLOTTING FEATURES===============
   #for feature in ["perimeter", "area", "minor_axis_length"]:
   for feature in ["area"]: 
-    LineplotTrackFeature(segm_output_csv, f"{segmentation_repo + feature}_3tmp.jpg", feature)
+    LineplotTrackFeature(segm_output_csv, f"{segmentation_repo + feature}_postprocessed.jpg", feature)
 
