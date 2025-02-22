@@ -8,9 +8,20 @@ from scipy.spatial import KDTree
 import math 
 import seaborn as sns 
 
+import matplotlib.colors as mcolors
+import matplotlib.patches as patches
+
 def CreateDir(dir_path):
   if not os.path.exists(dir_path[:-1]):
      os.makedirs(dir_path[:-1])
+
+def ApplyCLAHE(image):
+    if len(image.shape) == 3:  # If the image has 3 channels (BGR)
+        image = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)  # Convert to grayscale
+    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+    image_clahe = clahe.apply(image)
+    image_rgb = cv2.cvtColor(image_clahe, cv2.COLOR_GRAY2RGB)
+    return image_rgb
 
 def AdjustColorRange(image):
     norm_image = cv2.normalize(image, None, 0, 255, cv2.NORM_MINMAX)
@@ -84,13 +95,7 @@ def DataExtraction(data_path: str, i:int, contours, scalebar, min_contour_points
        continue
  
     #filter out small spots
-    if area * scalebar ** 2 > .25: #/mu m
-        continue
-    if perimeter * scalebar > 3: 
-       continue
-    if minor_axis_length * scalebar > .34:
-        continue
-    
+
     #get centroid metrics  
     M = cv2.moments(contour)
     if M['m00'] != 0:
@@ -156,18 +161,21 @@ def write_data(data, columns, i, output_csv):
     if i != 0:
       data.to_csv(output_csv, index=False, header = False, mode = "a")
 
-def LineplotTrackFeature(data_input_path, lineplot_output_path, feature) -> None:
+def LineplotTrackFeature(data_input_path, lineplot_output_path, feature, color_dict) -> None:
    df = pd.read_csv(data_input_path)
    spore_ids = df["spore_id"].unique()
    plt.figure(figsize = (6, 4))
    tracks = 0
    for spore_id in spore_ids:
       spore_df = df[df["spore_id"] == spore_id]
-      sns.scatterplot(x = "image_idx", y = feature, data = spore_df,  s = 30)
-      sns.lineplot(x = "image_idx", y = feature, data = spore_df,  linewidth = 1)
+      sns.scatterplot(x = "image_idx", y = feature, data = spore_df, hue = "spore_id", palette = color_dict, s = 30)
+      sns.lineplot(x = "image_idx", y = feature, data = spore_df,  hue = "spore_id", palette = color_dict, linewidth = 2, legend = False)
       tracks += 1
+   for tmp in [11, 35]:
+      plt.axvline(tmp)
    plt.xlabel("Time index", fontsize = 18)
    plt.ylabel(feature.title(), fontsize = 18)
+   plt.legend(fontsize = 8, loc = "upper right")
    plt.savefig(lineplot_output_path)
    print(f"plotting {tracks} spore {feature}s...")
    print(f"jpg saved to {lineplot_output_path}...")
@@ -195,10 +203,15 @@ def Gif(image_dir, gif_name, fps, output_dir):
 def create_artif_data(metrics_t: list, prev_data_csv_path: str):
   df_t = pd.DataFrame(metrics_t)
 
+  t_idx = int(df_t["image_idx"].values[0])
+
+
+  if t_idx == 0:
+    return pd.DataFrame()
+
   if df_t.empty:
     return pd.DataFrame()
   df_allt = pd.read_csv(prev_data_csv_path)
-  t_idx = int(df_t["image_idx"].values[0])
   df_tprev = df_allt[df_allt["image_idx"] == t_idx - 1]
   sporeids_tprev = df_tprev["spore_id"].unique()
   sporeids_t = df_t["spore_id"].unique()
@@ -206,8 +219,37 @@ def create_artif_data(metrics_t: list, prev_data_csv_path: str):
   df_tprev_missing = df_tprev[df_tprev["spore_id"].isin(missing_sporeids)]
   df_t_artificial = df_tprev_missing.copy()
   df_t_artificial["image_idx"] = t_idx
+  df_t_artificial["experimental"] = 0
   return df_t_artificial
 
+
+def draw_circles(image_dir, output_dir, data_path, color_dict):
+    '''doesnt work, the image read is in 369x369 for some reason'''
+    print(f"Drawing circles on images from {image_dir} and saving to {output_dir}...")
+    df = pd.read_csv(data_path)
+    # # Create output directory if it does not exist
+    if not os.path.exists(output_dir):
+        os.makedirs(output_dir)
+
+    image_files = sorted(
+        [os.path.join(image_dir, file) for file in os.listdir(image_dir) if file.endswith(('.png', '.jpg', '.jpeg'))]
+    )
+    
+    for image_file in image_files:
+      image = cv2.imread(image_file)
+      t_idx = int(os.path.basename(image_file).split("_")[-1].replace(".jpg", ""))
+      print(t_idx)
+      df_t = df[df["image_idx"] == t_idx]
+      positions = df_t[["x", "y"]].values
+      for pos in positions:
+          x, y = int(pos[0]), int(pos[1])  # Ensure integer format
+          cv2.circle(image, (x, y), 2, (255, 0, 0))
+
+      plt.imshow(image)
+      plt.axis('off')
+      output_path = os.path.join(output_dir, os.path.basename(image_file))
+      cv2.imwrite(output_path, image)
+      plt.close()
 
 def postprocess_artificial_threshold(t_idx:int, csv_path:str, artif_max_threshold = .7, window_size = 10) -> pd.DataFrame:
   if t_idx in [0, 1]:
@@ -231,7 +273,8 @@ def postprocess_artificial_threshold(t_idx:int, csv_path:str, artif_max_threshol
   df_processed["spore_id"] = df_processed["spore_id"].astype(float)  # Convert for safe filtering
   bad_tracks_ids = [float(spore) for spore in bad_tracks_ids]  # Ensure IDs match
   df_processed = df_processed[~df_processed["spore_id"].isin(bad_tracks_ids)]
-  print(f"\tfiltered {len(bad_tracks_ids)} spores at index {t_idx} (too artificial)...")
+  if len(bad_tracks_ids)> 0:
+    print(f"\tfiltered {len(bad_tracks_ids)} spores at index {t_idx} (too artificial)...")
   return df_processed
 
 
@@ -261,7 +304,7 @@ if __name__ == "__main__":
   #for image_file in os.listdir(image_folder_path): # FOR EXP USE
   for test_idx in range(0, 200): #FOR TEST USE
     image_file = "M4581_s1_ThT_stabilized_" + str(test_idx).zfill(4) + ".tif" #FOR TEST USE
-    image_path = os.path.join(image_folder_path, image_file)
+    image_path = os.path.join(image_folder_path, image_file)#wint need this eithr 
     image_idx = image_file.split("_")[-1].replace(".tif", "")
     print(f"working on image {image_idx}...")
     image = cv2.imread(image_path)
@@ -273,6 +316,8 @@ if __name__ == "__main__":
 
     #PREPROCESSING==================
     image = BackgroundSubtraction(image)#background subtraction
+    image = ApplyCLAHE(image) #last
+
     image = AdjustColorRange(image)#color range adjustment
     plt.imshow(image)
     plt.axis('off')
@@ -285,17 +330,15 @@ if __name__ == "__main__":
     #DATA EXTRACTION/SPOT FILTERING=================
     shape_metrics, filtered_contours = DataExtraction(segm_output_csv, image_idx, contours, scalebar)
     #df with spores data from last frame, but reindexed to current frame 
+
     #COMBINE TRUE AND ARTIFICIAL DATA
     cols = ["image_idx", "spore_id", "x", "y", "perimeter", "area", "minor_axis_length"]
     df = pd.DataFrame(shape_metrics, columns=cols)
     df["experimental"] = 1
 
-    #POSTPROCESSING=================
-    #create artificial data for missing spores from prev time points, removes track if more than a fraction of any cell track is artifical over window size on prev t 
-    if test_idx > 0:
-      artificial_data_df = create_artif_data(shape_metrics, segm_output_csv)
-      artificial_data_df["experimental"] = 0
-      df = pd.concat([df, artificial_data_df])
+    #fill artificial data=================
+    artificial_data_df = create_artif_data(shape_metrics, segm_output_csv)
+    df = pd.concat([df, artificial_data_df])
 
     #WRITE DATA=================
     write_data(df, cols, test_idx, segm_output_csv)
@@ -305,18 +348,23 @@ if __name__ == "__main__":
     df.to_csv(segm_output_csv, index = False)
 
     #PLOT SEGMENTED IMAGE WITH SPOTS
-    sns.scatterplot(x = "x", y = "y", data = df, color = "white", s=3)
     plt.savefig(os.path.join(segmented_image_dir, image_file.replace(".tif", ".jpg")), bbox_inches='tight', pad_inches=0)
     plt.close()
     
+  unique_spores = df["spore_id"].unique()
+  colors = sns.color_palette("pastel", len(unique_spores))  # Generate distinct colors
+  spore_color_map = dict(zip(unique_spores, colors))  # Map spores to colors
+
   #MAKE GIFS=========
   Gif(original_image_dir, f'{experiment}_{microscopy}_Unprocessed.gif', 3, segmentation_repo)
   Gif(preprocessed_image_dir, f'{experiment}_{microscopy}_Preprocessed.gif', 3, segmentation_repo)
+  processed_images_dir = "/Users/alexandranava/Desktop/Spores/Spore_Segmentation/ProcessedImages/M4581_s1_ThT/"
+  #draw_circles(segmented_image_dir, processed_images_dir, segm_output_csv, spore_color_map)
   Gif(segmented_image_dir, f'{experiment}_{microscopy}_Segmented.gif', 3, segmentation_repo)
 
 
   #PLOTTING FEATURES===============
-  #for feature in ["perimeter", "area", "minor_axis_length"]:
-  for feature in ["area"]: 
-    LineplotTrackFeature(segm_output_csv, f"{segmentation_repo + feature}_postprocessed.jpg", feature)
+  for feature in ["perimeter", "area", "minor_axis_length"]:
+  #for feature in ["area"]: 
+    LineplotTrackFeature(segm_output_csv, f"{segmentation_repo + feature}_postprocessed.jpg", feature, spore_color_map)
 
